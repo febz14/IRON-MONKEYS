@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FitCoach – a simple fitness AI agent</title>
+<style>
+  :root{--bg:#eef2f6;--ink:#14213d;--muted:#5b6678;--card:#ffffff;--accent:#2e6fd8;--accent-ink:#ffffff;--warm:#f29e4c;--line:#d5dce6}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:"Avenir Next","Segoe UI",system-ui,sans-serif;line-height:1.5}
+  header{padding:28px 20px 8px;max-width:760px;margin:0 auto}
+  h1{margin:0;font-size:2rem;letter-spacing:-.02em}
+  header p{margin:6px 0 0;color:var(--muted);max-width:56ch}
+  main{max-width:760px;margin:0 auto;padding:16px 20px 40px}
+  #chat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;min-height:320px;max-height:62vh;overflow-y:auto}
+  .msg{max-width:88%;margin:8px 0;padding:10px 14px;border-radius:12px;white-space:pre-wrap}
+  .bot{background:var(--bg);border-top-left-radius:2px}
+  .me{background:var(--accent);color:var(--accent-ink);margin-left:auto;border-top-right-radius:2px}
+  .bot.wide{max-width:100%;white-space:normal}
+  .plan h3{margin:14px 0 4px;font-size:1rem}
+  .plan ul{margin:0 0 6px;padding-left:20px}
+  .stats{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+  .stat b{display:block;font-size:1.25rem}
+  #controls{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}
+  button{font:inherit;cursor:pointer;border-radius:999px;border:1.5px solid var(--accent);background:var(--card);color:var(--accent);padding:8px 16px}
+  button:hover{background:var(--accent);color:var(--accent-ink)}
+  button:focus-visible,input:focus-visible{outline:3px solid var(--warm);outline-offset:2px}
+  input{font:inherit;padding:8px 12px;border:1.5px solid var(--line);border-radius:10px;width:140px}
+  .ghost{border-color:var(--line);color:var(--muted)}
+  footer{max-width:760px;margin:0 auto;padding:0 20px 40px;color:var(--muted);font-size:.85rem}
+  .tool{font-size:.8rem;color:var(--muted);margin:-2px 0 6px 4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>FitCoach</h1>
+  <p>A small fitness agent that asks about you, builds a weekly plan, and adjusts it when you tell it how training went. Runs fully in your browser.</p>
+</header>
+<main>
+  <div id="chat" aria-live="polite"></div>
+  <div id="controls"></div>
+</main>
+<footer>
+  FitCoach gives general fitness information only. It is not medical advice. If you have an injury or a health condition, check with a doctor or qualified trainer before starting.
+</footer>
+
+<script>
+/* ---------- TOOLS (the agent decides when to call these) ---------- */
+
+// Tool 1: calories using the Mifflin-St Jeor formula
+function calculateTDEE(p){
+  const base = 10*p.weight + 6.25*p.height - 5*p.age + (p.sex==="male" ? 5 : p.sex==="female" ? -161 : -78);
+  const factor = {low:1.3, moderate:1.5, high:1.7}[p.activity];
+  const tdee = Math.round(base*factor);
+  const adj = {fatloss:-400, muscle:250, endurance:0}[p.goal];
+  const calories = Math.max(1200, tdee + adj);
+  const perKg = {fatloss:1.6, muscle:1.8, endurance:1.4}[p.goal];
+  return {tdee, calories, protein: Math.round(perKg*p.weight)};
+}
+
+// Tool 2: build a weekly workout plan
+const EX = {
+  bodyweight:{push:["Push-ups","Pike push-ups","Chair dips"],pull:["Backpack rows","Towel door rows","Superman holds"],legs:["Squats","Reverse lunges","Glute bridges"],core:["Plank","Dead bug","Mountain climbers"],cardio:["Jumping jacks","Brisk walk or jog","Burpees"]},
+  dumbbells:{push:["Dumbbell bench press","Overhead press","Incline push-ups"],pull:["One-arm dumbbell row","Reverse fly","Dumbbell curl"],legs:["Goblet squat","Romanian deadlift","Walking lunges"],core:["Plank","Russian twist","Dead bug"],cardio:["Jump rope","Brisk walk or jog","Dumbbell swings"]},
+  gym:{push:["Barbell bench press","Overhead press","Cable fly"],pull:["Lat pulldown","Seated cable row","Face pull"],legs:["Back squat","Leg press","Romanian deadlift"],core:["Cable crunch","Hanging knee raise","Plank"],cardio:["Treadmill intervals","Rowing machine","Stationary bike"]}
+};
+const DAYS = {
+  full:{name:"Full body",g:["push","pull","legs","core"],n:1},
+  upper:{name:"Upper body",g:["push","pull","core"],n:2},
+  lower:{name:"Lower body",g:["legs","core"],n:2},
+  push:{name:"Push",g:["push","core"],n:2},
+  pull:{name:"Pull",g:["pull","core"],n:2},
+  legs:{name:"Legs",g:["legs","core"],n:2}
+};
+const SPLITS = {
+  2:["full","full"],3:["full","full","full"],4:["upper","lower","upper","lower"],
+  5:["push","pull","legs","upper","lower"],6:["push","pull","legs","push","pull","legs"]
+};
+function generateWorkoutPlan(p, volume){
+  const sets = Math.min(5, Math.max(1, {beginner:2,intermediate:3,advanced:4}[p.level] + volume));
+  const reps = {muscle:"8-12", fatloss:"12-15", endurance:"15-20"}[p.goal];
+  const lib = EX[p.equipment];
+  return SPLITS[p.days].map((key, i) => {
+    const d = DAYS[key];
+    const items = [];
+    d.g.forEach(g => {
+      for(let k=0;k<d.n;k++){
+        const ex = lib[g][(i+k) % lib[g].length];
+        items.push(g==="core" ? ex+" – "+sets+" x 30-45 sec" : ex+" – "+sets+" x "+reps);
+      }
+    });
+    if(p.goal!=="muscle") items.push(lib.cardio[i % 3]+" – 10-20 min");
+    return {day:"Day "+(i+1), title:d.name, items};
+  });
+}
+
+// Tool 3: save the user's profile and logs in the browser (memory)
+function save(state){ try{ localStorage.setItem("fitcoach", JSON.stringify(state)); }catch(e){} }
+function load(){ try{ return JSON.parse(localStorage.getItem("fitcoach")); }catch(e){ return null; } }
+
+// Tool 4: adjust the plan from feedback (the feedback loop)
+function adjustPlan(state, feedback){
+  let note = "";
+  if(feedback==="easy"){ state.volume = Math.min(1, state.volume+1); note = "Noted that it felt easy. I added one set per exercise. Increase your weights slightly too."; }
+  else if(feedback==="hard"){ state.volume = Math.max(-1, state.volume-1); note = "Noted that it felt too hard. I removed one set per exercise. Focus on good form and rest well."; }
+  else if(feedback==="skipped"){ state.profile.days = Math.max(2, state.profile.days-1); note = "Life happens. I reduced your plan to "+state.profile.days+" days a week so it is easier to stick to."; }
+  else if(feedback==="pain"){ state.volume = Math.max(-1, state.volume-1); note = "Stop any exercise that causes pain. I lowered the volume, but please see a doctor or physiotherapist before continuing. I can't give medical advice."; }
+  else { note = "Good. Keep the same plan, and try adding a little weight or one rep when it feels comfortable."; }
+  return note;
+}
+
+/* ---------- AGENT (asks, uses tools, remembers, adapts) ---------- */
+const STEPS = [
+  {key:"goal", q:"What is your main goal?", opts:[["fatloss","Lose fat"],["muscle","Build muscle"],["endurance","Build endurance"]]},
+  {key:"level", q:"What is your fitness level?", opts:[["beginner","Beginner"],["intermediate","Intermediate"],["advanced","Advanced"]]},
+  {key:"equipment", q:"What equipment do you have?", opts:[["bodyweight","None (bodyweight)"],["dumbbells","Dumbbells"],["gym","Full gym"]]},
+  {key:"days", q:"How many days a week can you train?", opts:[[2,"2"],[3,"3"],[4,"4"],[5,"5"],[6,"6"]]},
+  {key:"sex", q:"For the calorie formula, which fits you best?", opts:[["female","Female"],["male","Male"],["other","Prefer not to say"]]},
+  {key:"age", q:"How old are you?", num:true, min:14, max:90, unit:"years"},
+  {key:"weight", q:"What is your weight?", num:true, min:30, max:250, unit:"kg"},
+  {key:"height", q:"What is your height?", num:true, min:120, max:230, unit:"cm"},
+  {key:"activity", q:"How active are you outside of workouts?", opts:[["low","Mostly sitting"],["moderate","On my feet some of the day"],["high","Physically active all day"]]}
+];
+
+const chat = document.getElementById("chat");
+const controls = document.getElementById("controls");
+let state = {profile:{}, volume:0, log:[]};
+let step = 0;
+
+function say(text, who){
+  const d = document.createElement("div");
+  d.className = "msg " + (who||"bot");
+  d.textContent = text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+function sayHTML(html){
+  const d = document.createElement("div");
+  d.className = "msg bot wide plan";
+  d.innerHTML = html;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+function toolNote(name){
+  const d = document.createElement("div");
+  d.className = "tool"; d.textContent = "Using tool: " + name;
+  chat.appendChild(d);
+}
+function clearControls(){ controls.innerHTML = ""; }
+function btn(label, fn, cls){
+  const b = document.createElement("button");
+  b.textContent = label; if(cls) b.className = cls;
+  b.addEventListener("click", fn); controls.appendChild(b);
+}
+
+function ask(){
+  clearControls();
+  if(step >= STEPS.length){ return finishProfile(); }
+  const s = STEPS[step];
+  say(s.q);
+  if(s.num){
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.min = s.min; inp.max = s.max; inp.placeholder = s.unit;
+    inp.setAttribute("aria-label", s.q);
+    controls.appendChild(inp);
+    const go = () => {
+      const v = Number(inp.value);
+      if(!v || v < s.min || v > s.max){ say("Please enter a number between "+s.min+" and "+s.max+" ("+s.unit+")."); return; }
+      answer(v, v+" "+s.unit);
+    };
+    btn("Send", go);
+    inp.addEventListener("keydown", e => { if(e.key==="Enter") go(); });
+    inp.focus();
+  } else {
+    s.opts.forEach(o => btn(o[1], () => answer(o[0], o[1])));
+  }
+}
+function answer(value, label){
+  state.profile[STEPS[step].key] = value;
+  say(label, "me"); step++; ask();
+}
+
+function finishProfile(){
+  clearControls();
+  say("Thanks. Let me work out your numbers and build your plan.");
+  toolNote("calculate_tdee");
+  toolNote("generate_workout_plan");
+  showPlan(true);
+}
+
+function showPlan(first){
+  clearControls();
+  const p = state.profile;
+  const t = calculateTDEE(p);
+  const plan = generateWorkoutPlan(p, state.volume);
+  const goalName = {fatloss:"fat loss", muscle:"muscle building", endurance:"endurance"}[p.goal];
+  let html = "<strong>Your "+p.days+"-day plan for "+goalName+"</strong>";
+  html += '<div class="stats"><div class="stat"><b>'+t.calories+'</b>kcal per day</div><div class="stat"><b>'+t.protein+' g</b>protein per day</div><div class="stat"><b>'+t.tdee+'</b>maintenance kcal</div></div>';
+  plan.forEach(d => {
+    html += "<h3>"+d.day+": "+d.title+"</h3><ul>"+d.items.map(i => "<li>"+i+"</li>").join("")+"</ul>";
+  });
+  html += "<p>Warm up for 5 minutes before each session and rest 60-90 seconds between sets. This is general fitness information, not medical advice.</p>";
+  sayHTML(html);
+  toolNote("save_profile");
+  save(state);
+  askFeedback();
+}
+
+function askFeedback(){
+  clearControls();
+  say("After you've trained for a week, tell me how it went and I'll adjust the plan.");
+  [["easy","Too easy"],["ok","Just right"],["hard","Too hard"],["skipped","I skipped sessions"],["pain","I felt pain"]].forEach(o => {
+    btn(o[1], () => {
+      say(o[1], "me");
+      toolNote("log_workout");
+      state.log.push({date:new Date().toISOString().slice(0,10), feedback:o[0]});
+      toolNote("adjust_plan");
+      say(adjustPlan(state, o[0]));
+      save(state);
+      showPlan(false);
+    });
+  });
+  btn("Start over", reset, "ghost");
+}
+
+function reset(){
+  state = {profile:{}, volume:0, log:[]}; step = 0;
+  try{ localStorage.removeItem("fitcoach"); }catch(e){}
+  chat.innerHTML = ""; start();
+}
+
+function start(){
+  const saved = load();
+  if(saved && saved.profile && saved.profile.activity){
+    state = saved; step = STEPS.length;
+    say("Welcome back. I remember your profile and "+state.log.length+" logged check-in(s).");
+    showPlan(false);
+  } else {
+    say("Hi, I'm FitCoach. I'll ask a few questions, then build you a weekly plan. I use general fitness knowledge only, not medical advice.");
+    ask();
+  }
+}
+start();
+</script>
+</body>
+</html>
